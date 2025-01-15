@@ -15,6 +15,7 @@
  */
 package io.netty.channel.kqueue;
 
+import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.EventLoopTaskQueueFactory;
@@ -33,6 +34,7 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.Queue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
@@ -47,6 +49,10 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
     private static final AtomicIntegerFieldUpdater<KQueueEventLoop> WAKEN_UP_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(KQueueEventLoop.class, "wakenUp");
     private static final int KQUEUE_WAKE_UP_IDENT = 0;
+    // `kqueue()` may return EINVAL when a large number such as Integer.MAX_VALUE is specified as timeout.
+    // 24 hours would be a large enough value.
+    // https://man.freebsd.org/cgi/man.cgi?query=kevent&apropos=0&sektion=0&manpath=FreeBSD+6.1-RELEASE&format=html#end
+    private static final int KQUEUE_MAX_TIMEOUT_SECONDS = 86399; // 24 hours - 1 second
 
     static {
         // Ensure JNI is initialized by the time this class is loaded by this time!
@@ -165,8 +171,9 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
         }
 
         long totalDelay = delayNanos(System.nanoTime());
-        int delaySeconds = (int) min(totalDelay / 1000000000L, Integer.MAX_VALUE);
-        return kqueueWait(delaySeconds, (int) min(totalDelay - delaySeconds * 1000000000L, Integer.MAX_VALUE));
+        int delaySeconds = (int) min(totalDelay / 1000000000L, KQUEUE_MAX_TIMEOUT_SECONDS);
+        int delayNanos = (int) (totalDelay % 1000000000L);
+        return kqueueWait(delaySeconds, delayNanos);
     }
 
     private int kqueueWaitNow() throws IOException {
@@ -351,6 +358,16 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
     @Override
     public int registeredChannels() {
         return channels.size();
+    }
+
+    @Override
+    public Iterator<Channel> registeredChannelsIterator() {
+        assert inEventLoop();
+        IntObjectMap<AbstractKQueueChannel> ch = channels;
+        if (ch.isEmpty()) {
+            return ChannelsReadOnlyIterator.empty();
+        }
+        return new ChannelsReadOnlyIterator<AbstractKQueueChannel>(ch.values());
     }
 
     @Override
