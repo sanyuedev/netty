@@ -10,6 +10,7 @@ Netty is an asynchronous event-driven network application framework for rapid de
 * [Downloads](https://netty.io/downloads.html)
 * [Documentation](https://netty.io/wiki/)
 * [@netty_project](https://twitter.com/netty_project)
+* [Official Discord server](https://discord.gg/q4aQ2XjaCa)
 
 ## How to build
 
@@ -17,7 +18,7 @@ For the detailed information about building and developing Netty, please visit [
 
 You require the following to build Netty:
 
-* Latest stable [OpenJDK 8](https://adoptopenjdk.net)
+* Latest stable [OpenJDK 8](https://adoptium.net/)
 * Latest stable [Apache Maven](https://maven.apache.org/)
 * If you are on Linux or MacOS, you need [additional development packages](https://netty.io/wiki/native-transports.html) installed on your system, because you'll build the native transport.
 

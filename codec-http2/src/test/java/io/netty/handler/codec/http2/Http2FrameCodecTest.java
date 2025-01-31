@@ -220,13 +220,29 @@ public class Http2FrameCodecTest {
         Http2Connection conn = new DefaultHttp2Connection(true);
         Http2ConnectionEncoder enc = new DefaultHttp2ConnectionEncoder(conn, new DefaultHttp2FrameWriter());
         Http2ConnectionDecoder dec = new DefaultHttp2ConnectionDecoder(conn, enc, new DefaultHttp2FrameReader());
-        Http2FrameCodec codec = new Http2FrameCodec(enc, dec, new Http2Settings(), false);
+        Http2FrameCodec codec = new Http2FrameCodec(enc, dec, new Http2Settings(), false, true);
         EmbeddedChannel em = new EmbeddedChannel(codec);
 
         // We call #consumeBytes on a stream id which has not been seen yet to emulate the case
         // where a stream is deregistered which in reality can happen in response to a RST.
         assertFalse(codec.consumeBytes(1, 1));
         assertTrue(em.finishAndReleaseAll());
+    }
+
+    @Test
+    public void canCreateCustomUnknownFrame() {
+        Http2Connection conn = new DefaultHttp2Connection(true);
+        Http2ConnectionEncoder enc = new DefaultHttp2ConnectionEncoder(conn, new DefaultHttp2FrameWriter());
+        Http2ConnectionDecoder dec = new DefaultHttp2ConnectionDecoder(conn, enc, new DefaultHttp2FrameReader());
+        new Http2FrameCodec(enc, dec, new Http2Settings(), false, true) {
+            @Override
+            protected Http2StreamFrame newHttp2UnknownFrame(byte frameType,
+                                                      int streamId,
+                                                      Http2Flags flags,
+                                                      ByteBuf payload) {
+                return super.newHttp2UnknownFrame(frameType, streamId, flags, payload);
+            }
+        };
     }
 
     @Test
@@ -842,6 +858,13 @@ public class Http2FrameCodecTest {
                 });
 
         assertTrue(listenerExecuted.get());
+    }
+
+    @Test
+    public void writeHeadersVoidPromise() {
+        final Http2FrameStream stream = frameCodec.newStream();
+        channel.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers()).stream(stream),
+                channel.voidPromise());
     }
 
     @Test

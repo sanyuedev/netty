@@ -21,6 +21,7 @@ import io.netty.channel.ChannelOutboundBuffer.MessageProcessor;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.unix.IovArray;
 import io.netty.channel.unix.Limits;
+import io.netty.channel.unix.SegmentedDatagramPacket;
 import io.netty.util.internal.UnstableApi;
 
 import java.net.Inet6Address;
@@ -162,6 +163,9 @@ final class NativeDatagramPacketArray {
     @UnstableApi
     public final class NativeDatagramPacket {
 
+        // IMPORTANT: Most of the below variables are accessed via JNI. Be aware if you change any of these you also
+        // need to change these in the related .c file!
+
         // This is the actual struct iovec*
         private long memoryAddress;
         private int count;
@@ -205,18 +209,24 @@ final class NativeDatagramPacketArray {
             }
         }
 
+        boolean hasSender() {
+            return senderPort > 0;
+        }
+
         DatagramPacket newDatagramPacket(ByteBuf buffer, InetSocketAddress recipient) throws UnknownHostException {
             InetSocketAddress sender = newAddress(senderAddr, senderAddrLen, senderPort, senderScopeId, ipv4Bytes);
             if (recipientAddrLen != 0) {
                 recipient = newAddress(recipientAddr, recipientAddrLen, recipientPort, recipientScopeId, ipv4Bytes);
             }
-            buffer.writerIndex(count);
+
+            // Slice out the buffer with the correct length.
+            ByteBuf slice = buffer.retainedSlice(buffer.readerIndex(), count);
 
             // UDP_GRO
             if (segmentSize > 0) {
-                return new SegmentedDatagramPacket(buffer, segmentSize, recipient, sender);
+                return new SegmentedDatagramPacket(slice, segmentSize, recipient, sender);
             }
-            return new DatagramPacket(buffer, recipient, sender);
+            return new DatagramPacket(slice, recipient, sender);
         }
     }
 }

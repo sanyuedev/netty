@@ -29,7 +29,11 @@ services:
 
   build:
     <<: *common
-    command: /bin/bash -cl "./mvnw -B -ntp clean install -Dio.netty.testsuite.badHost=netty.io -Dtcnative.classifier=linux-x86_64-fedora"
+    command: '/bin/bash -cl "
+      ./mvnw -B -ntp clean install -Dio.netty.testsuite.badHost=netty.io -Dtcnative.classifier=linux-x86_64-fedora && 
+      cd testsuite-shading &&
+      ../mvnw -B -ntp integration-test failsafe:verify -Dtcnative.classifier=linux-x86_64-fedora
+    "'
 
   deploy:
     <<: *common
@@ -61,6 +65,14 @@ services:
   build-leak-boringssl-static:
     <<: *common
     command: /bin/bash -cl "./mvnw -B -ntp -Pboringssl,leak clean install -Dio.netty.testsuite.badHost=netty.io -Dxml.skip=true"
+
+  build-leak-adaptive:
+    <<: *common
+    command: /bin/bash -cl "./mvnw -B -ntp -Pboringssl,leak clean install -Dio.netty.testsuite.badHost=netty.io -Dxml.skip=true -Dio.netty.allocator.type=adaptive"
+
+  build-boringssl-snapshot:
+    <<: *common
+    command: /bin/bash -cl "./mvnw -B -ntp -pl handler -Pboringssl-snapshot clean package -Dxml.skip=true -Dtcnative.classifier=linux-x86_64"
 
   shell:
     <<: *common

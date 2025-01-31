@@ -27,6 +27,7 @@ import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
@@ -49,15 +50,17 @@ final class PlatformDependent0 {
     private static final Method ALIGN_SLICE;
     private static final int JAVA_VERSION = javaVersion0();
     private static final boolean IS_ANDROID = isAndroid0();
+    private static final boolean STORE_FENCE_AVAILABLE;
 
     private static final Throwable UNSAFE_UNAVAILABILITY_CAUSE;
     private static final Object INTERNAL_UNSAFE;
-    private static final boolean IS_EXPLICIT_TRY_REFLECTION_SET_ACCESSIBLE = explicitTryReflectionSetAccessible0();
 
     // See https://github.com/oracle/graal/blob/master/sdk/src/org.graalvm.nativeimage/src/org/graalvm/nativeimage/
     // ImageInfo.java
     private static final boolean RUNNING_IN_NATIVE_IMAGE = SystemPropertyUtil.contains(
             "org.graalvm.nativeimage.imagecode");
+
+    private static final boolean IS_EXPLICIT_TRY_REFLECTION_SET_ACCESSIBLE = explicitTryReflectionSetAccessible0();
 
     static final Unsafe UNSAFE;
 
@@ -74,6 +77,8 @@ final class PlatformDependent0 {
 
     private static final boolean UNALIGNED;
 
+    private static final long BITS_MAX_DIRECT_MEMORY;
+
     static {
         final ByteBuffer direct;
         Field addressField = null;
@@ -81,7 +86,7 @@ final class PlatformDependent0 {
         Throwable unsafeUnavailabilityCause = null;
         Unsafe unsafe;
         Object internalUnsafe = null;
-
+        boolean storeFenceAvailable = false;
         if ((unsafeUnavailabilityCause = EXPLICIT_NO_UNSAFE_CAUSE) != null) {
             direct = null;
             addressField = null;
@@ -135,17 +140,88 @@ final class PlatformDependent0 {
                 logger.debug("sun.misc.Unsafe.theUnsafe: available");
             }
 
-            // ensure the unsafe supports all necessary methods to work around the mistake in the latest OpenJDK
+            // ensure the unsafe supports all necessary methods to work around the mistake in the latest OpenJDK,
+            // or that they haven't been removed by JEP 471.
             // https://github.com/netty/netty/issues/1061
             // https://www.mail-archive.com/jdk6-dev@openjdk.java.net/msg00698.html
+            // https://openjdk.org/jeps/471
             if (unsafe != null) {
                 final Unsafe finalUnsafe = unsafe;
                 final Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
                     @Override
                     public Object run() {
                         try {
-                            finalUnsafe.getClass().getDeclaredMethod(
+                            // Other methods like storeFence() and invokeCleaner() are tested for elsewhere.
+                            Class<? extends Unsafe> cls = finalUnsafe.getClass();
+                            cls.getDeclaredMethod(
                                     "copyMemory", Object.class, long.class, Object.class, long.class, long.class);
+                            if (javaVersion() > 23) {
+                                cls.getDeclaredMethod("objectFieldOffset", Field.class);
+                                cls.getDeclaredMethod("staticFieldOffset", Field.class);
+                                cls.getDeclaredMethod("staticFieldBase", Field.class);
+                                cls.getDeclaredMethod("arrayBaseOffset", Class.class);
+                                cls.getDeclaredMethod("arrayIndexScale", Class.class);
+                                cls.getDeclaredMethod("allocateMemory", long.class);
+                                cls.getDeclaredMethod("reallocateMemory", long.class, long.class);
+                                cls.getDeclaredMethod("freeMemory", long.class);
+                                cls.getDeclaredMethod("setMemory", long.class, long.class, byte.class);
+                                cls.getDeclaredMethod("setMemory", Object.class, long.class, long.class, byte.class);
+                                cls.getDeclaredMethod("getBoolean", Object.class, long.class);
+                                cls.getDeclaredMethod("getByte", long.class);
+                                cls.getDeclaredMethod("getByte", Object.class, long.class);
+                                cls.getDeclaredMethod("getInt", long.class);
+                                cls.getDeclaredMethod("getInt", Object.class, long.class);
+                                cls.getDeclaredMethod("getLong", long.class);
+                                cls.getDeclaredMethod("getLong", Object.class, long.class);
+                                cls.getDeclaredMethod("putByte", long.class, byte.class);
+                                cls.getDeclaredMethod("putByte", Object.class, long.class, byte.class);
+                                cls.getDeclaredMethod("putInt", long.class, int.class);
+                                cls.getDeclaredMethod("putInt", Object.class, long.class, int.class);
+                                cls.getDeclaredMethod("putLong", long.class, long.class);
+                                cls.getDeclaredMethod("putLong", Object.class, long.class, long.class);
+                                cls.getDeclaredMethod("addressSize");
+                            }
+                            if (javaVersion() >= 23) {
+                                // The following tests the methods are usable.
+                                // Will throw UnsupportedOperationException if unsafe memory access is denied:
+                                long address = finalUnsafe.allocateMemory(8);
+                                finalUnsafe.putLong(address, 42);
+                                finalUnsafe.freeMemory(address);
+                            }
+                            return null;
+                        } catch (UnsupportedOperationException e) {
+                            return e;
+                        } catch (NoSuchMethodException e) {
+                            return e;
+                        } catch (SecurityException e) {
+                            return e;
+                        }
+                    }
+                });
+
+                if (maybeException == null) {
+                    logger.debug("sun.misc.Unsafe base methods: all available");
+                } else {
+                    // Unsafe.copyMemory(Object, long, Object, long, long) unavailable.
+                    unsafe = null;
+                    unsafeUnavailabilityCause = (Throwable) maybeException;
+                    if (logger.isTraceEnabled()) {
+                        logger.debug("sun.misc.Unsafe method unavailable:", unsafeUnavailabilityCause);
+                    } else {
+                        logger.debug("sun.misc.Unsafe method unavailable: {}",
+                                ((Throwable) maybeException).getMessage());
+                    }
+                }
+            }
+
+            // ensure Unsafe::storeFence to be available: jdk < 8 shouldn't have it
+            if (unsafe != null) {
+                final Unsafe finalUnsafe = unsafe;
+                final Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+                    @Override
+                    public Object run() {
+                        try {
+                            finalUnsafe.getClass().getDeclaredMethod("storeFence");
                             return null;
                         } catch (NoSuchMethodException e) {
                             return e;
@@ -156,16 +232,16 @@ final class PlatformDependent0 {
                 });
 
                 if (maybeException == null) {
-                    logger.debug("sun.misc.Unsafe.copyMemory: available");
+                    logger.debug("sun.misc.Unsafe.storeFence: available");
+                    storeFenceAvailable = true;
                 } else {
-                    // Unsafe.copyMemory(Object, long, Object, long, long) unavailable.
-                    unsafe = null;
-                    unsafeUnavailabilityCause = (Throwable) maybeException;
+                    storeFenceAvailable = false;
+                    // Unsafe.storeFence unavailable.
                     if (logger.isTraceEnabled()) {
-                        logger.debug("sun.misc.Unsafe.copyMemory: unavailable", (Throwable) maybeException);
+                        logger.debug("sun.misc.Unsafe.storeFence: unavailable", (Throwable) maybeException);
                     } else {
-                        logger.debug("sun.misc.Unsafe.copyMemory: unavailable: {}",
-                                ((Throwable) maybeException).getMessage());
+                        logger.debug("sun.misc.Unsafe.storeFence: unavailable: {}",
+                                     ((Throwable) maybeException).getMessage());
                     }
                 }
             }
@@ -237,8 +313,10 @@ final class PlatformDependent0 {
             INT_ARRAY_BASE_OFFSET = -1;
             INT_ARRAY_INDEX_SCALE = -1;
             UNALIGNED = false;
+            BITS_MAX_DIRECT_MEMORY = -1;
             DIRECT_BUFFER_CONSTRUCTOR = null;
             ALLOCATE_ARRAY_METHOD = null;
+            STORE_FENCE_AVAILABLE = false;
         } else {
             Constructor<?> directBufferConstructor;
             long address = -1;
@@ -248,7 +326,8 @@ final class PlatformDependent0 {
                             @Override
                             public Object run() {
                                 try {
-                                    final Constructor<?> constructor =
+                                    final Constructor<?> constructor = javaVersion() >= 21 ?
+                                            direct.getClass().getDeclaredConstructor(long.class, long.class) :
                                             direct.getClass().getDeclaredConstructor(long.class, int.class);
                                     Throwable cause = ReflectionUtil.trySetAccessible(constructor, true);
                                     if (cause != null) {
@@ -300,6 +379,8 @@ final class PlatformDependent0 {
             LONG_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(long[].class);
             LONG_ARRAY_INDEX_SCALE = UNSAFE.arrayIndexScale(long[].class);
             final boolean unaligned;
+            // using a known type to avoid loading new classes
+            final AtomicLong maybeMaxMemory = new AtomicLong(-1);
             Object maybeUnaligned = AccessController.doPrivileged(new PrivilegedAction<Object>() {
                 @Override
                 public Object run() {
@@ -309,9 +390,20 @@ final class PlatformDependent0 {
                         int version = javaVersion();
                         if (unsafeStaticFieldOffsetSupported() && version >= 9) {
                             // Java9/10 use all lowercase and later versions all uppercase.
-                            String fieldName = version >= 11 ? "UNALIGNED" : "unaligned";
+                            String fieldName = version >= 11? "MAX_MEMORY" : "maxMemory";
                             // On Java9 and later we try to directly access the field as we can do this without
                             // adjust the accessible levels.
+                            try {
+                                Field maxMemoryField = bitsClass.getDeclaredField(fieldName);
+                                if (maxMemoryField.getType() == long.class) {
+                                    long offset = UNSAFE.staticFieldOffset(maxMemoryField);
+                                    Object object = UNSAFE.staticFieldBase(maxMemoryField);
+                                    maybeMaxMemory.lazySet(UNSAFE.getLong(object, offset));
+                                }
+                            } catch (Throwable ignore) {
+                                // ignore if can't access
+                            }
+                            fieldName = version >= 11? "UNALIGNED" : "unaligned";
                             try {
                                 Field unalignedField = bitsClass.getDeclaredField(fieldName);
                                 if (unalignedField.getType() == boolean.class) {
@@ -361,6 +453,7 @@ final class PlatformDependent0 {
             }
 
             UNALIGNED = unaligned;
+            BITS_MAX_DIRECT_MEMORY = maybeMaxMemory.get() >= 0? maybeMaxMemory.get() : -1;
 
             if (javaVersion() >= 9) {
                 Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
@@ -424,6 +517,7 @@ final class PlatformDependent0 {
                 logger.debug("jdk.internal.misc.Unsafe.allocateUninitializedArray(int): unavailable prior to Java9");
             }
             ALLOCATE_ARRAY_METHOD = allocateArrayMethod;
+            STORE_FENCE_AVAILABLE = storeFenceAvailable;
         }
 
         if (javaVersion() > 9) {
@@ -443,7 +537,7 @@ final class PlatformDependent0 {
 
         INTERNAL_UNSAFE = internalUnsafe;
 
-        logger.debug("java.nio.DirectByteBuffer.<init>(long, int): {}",
+        logger.debug("java.nio.DirectByteBuffer.<init>(long, {int,long}): {}",
                 DIRECT_BUFFER_CONSTRUCTOR != null ? "available" : "unavailable");
     }
 
@@ -456,8 +550,15 @@ final class PlatformDependent0 {
     }
 
     private static Throwable explicitNoUnsafeCause0() {
-        final boolean noUnsafe = SystemPropertyUtil.getBoolean("io.netty.noUnsafe", false);
+        boolean noUnsafe = SystemPropertyUtil.getBoolean("io.netty.noUnsafe", false);
         logger.debug("-Dio.netty.noUnsafe: {}", noUnsafe);
+
+        // See JDK 23 JEP 471 https://openjdk.org/jeps/471 and sun.misc.Unsafe.beforeMemoryAccess() on JDK 23+.
+        String unsafeMemoryAccess = SystemPropertyUtil.get("sun.misc.unsafe.memory.access", "<unspecified>");
+        if (!("allow".equals(unsafeMemoryAccess) || "<unspecified>".equals(unsafeMemoryAccess))) {
+            logger.debug("--sun-misc-unsafe-memory-access={}", unsafeMemoryAccess);
+            noUnsafe = true;
+        }
 
         if (noUnsafe) {
             logger.debug("sun.misc.Unsafe: unavailable (io.netty.noUnsafe)");
@@ -483,6 +584,13 @@ final class PlatformDependent0 {
 
     static boolean isUnaligned() {
         return UNALIGNED;
+    }
+
+    /**
+     * Any value >= 0 should be considered as a valid max direct memory value.
+     */
+    static long bitsMaxDirectMemory() {
+        return BITS_MAX_DIRECT_MEMORY;
     }
 
     static boolean hasUnsafe() {
@@ -573,6 +681,15 @@ final class PlatformDependent0 {
 
     static int getInt(Object object, long fieldOffset) {
         return UNSAFE.getInt(object, fieldOffset);
+    }
+
+    static void safeConstructPutInt(Object object, long fieldOffset, int value) {
+        if (STORE_FENCE_AVAILABLE) {
+            UNSAFE.putInt(object, fieldOffset, value);
+            UNSAFE.storeFence();
+        } else {
+            UNSAFE.putIntVolatile(object, fieldOffset, value);
+        }
     }
 
     private static long getLong(Object object, long fieldOffset) {
@@ -931,7 +1048,8 @@ final class PlatformDependent0 {
 
     private static boolean explicitTryReflectionSetAccessible0() {
         // we disable reflective access
-        return SystemPropertyUtil.getBoolean("io.netty.tryReflectionSetAccessible", javaVersion() < 9);
+        return SystemPropertyUtil.getBoolean("io.netty.tryReflectionSetAccessible",
+                javaVersion() < 9 || RUNNING_IN_NATIVE_IMAGE);
     }
 
     static boolean isExplicitTryReflectionSetAccessible() {
