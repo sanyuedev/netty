@@ -24,6 +24,7 @@ import static io.netty.handler.codec.http2.Http2Stream.State.HALF_CLOSED_LOCAL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
@@ -164,7 +165,7 @@ public class StreamBufferingEncoderTest {
     @Test
     public void multipleWritesToActiveStream() {
         encoder.writeSettingsAck(ctx, newPromise());
-        encoderWriteHeaders(3, newPromise());
+        encoderWriteHeaders(3, newPromise(), false);
         assertEquals(0, encoder.numBufferedStreams());
         ByteBuf data = data();
         final int expectedBytes = data.readableBytes() * 3;
@@ -173,7 +174,7 @@ public class StreamBufferingEncoderTest {
         encoder.writeData(ctx, 3, data(), 0, false, newPromise());
         encoderWriteHeaders(3, newPromise());
 
-        writeVerifyWriteHeaders(times(1), 3);
+        writeVerifyWriteHeaders(times(1), 3, false);
         // Contiguous data writes are coalesced
         ArgumentCaptor<ByteBuf> bufCaptor = ArgumentCaptor.forClass(ByteBuf.class);
         verify(writer, times(1))
@@ -511,6 +512,18 @@ public class StreamBufferingEncoderTest {
         assertNotNull(f.cause());
     }
 
+    @Test
+    public void testExhaustedStreamId() throws Http2Exception {
+        testStreamId(Integer.MAX_VALUE - 2);
+        testStreamId(connection.local().incrementAndGetNextStreamId());
+    }
+
+    private void testStreamId(int nextStreamId) throws Http2Exception {
+        connection.local().createStream(nextStreamId, false);
+        ChannelFuture channelFuture = encoder.writeData(ctx, nextStreamId, EMPTY_BUFFER, 0, false, newPromise());
+        assertNull(channelFuture.cause());
+    }
+
     private void setMaxConcurrentStreams(int newValue) {
         try {
             encoder.remoteSettings(new Http2Settings().maxConcurrentStreams(newValue));
@@ -522,8 +535,16 @@ public class StreamBufferingEncoderTest {
     }
 
     private ChannelFuture encoderWriteHeaders(int streamId, ChannelPromise promise) {
-        encoder.writeHeaders(ctx, streamId, new DefaultHttp2Headers(), 0, DEFAULT_PRIORITY_WEIGHT,
-                             false, 0, false, promise);
+        return encoderWriteHeaders(streamId, promise, true);
+    }
+
+    private ChannelFuture encoderWriteHeaders(int streamId, ChannelPromise promise, boolean hasPriority) {
+        if (hasPriority) {
+            encoder.writeHeaders(ctx, streamId, new DefaultHttp2Headers(), 0, DEFAULT_PRIORITY_WEIGHT,
+                                 false, 0, false, promise);
+        } else {
+            encoder.writeHeaders(ctx, streamId, new DefaultHttp2Headers(), 0, false, promise);
+        }
         try {
             encoder.flowController().writePendingBytes();
             return promise;
@@ -533,9 +554,18 @@ public class StreamBufferingEncoderTest {
     }
 
     private void writeVerifyWriteHeaders(VerificationMode mode, int streamId) {
-        verify(writer, mode).writeHeaders(eq(ctx), eq(streamId), any(Http2Headers.class), eq(0),
-                                          eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0),
-                                          eq(false), any(ChannelPromise.class));
+        writeVerifyWriteHeaders(mode, streamId, true);
+    }
+
+    private void writeVerifyWriteHeaders(VerificationMode mode, int streamId, boolean hasPriority) {
+        if (hasPriority) {
+            verify(writer, mode).writeHeaders(eq(ctx), eq(streamId), any(Http2Headers.class), eq(0),
+                                              eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0),
+                                              eq(false), any(ChannelPromise.class));
+        } else {
+            verify(writer, mode).writeHeaders(eq(ctx), eq(streamId), any(Http2Headers.class), eq(0),
+                                              eq(false), any(ChannelPromise.class));
+        }
     }
 
     private Answer<ChannelFuture> successAnswer() {
